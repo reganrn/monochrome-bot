@@ -253,7 +253,7 @@ class GuildPlayer {
     this.cancelAloneTimer();
     this._cleanupPlaybackResources();
     try {
-      const urls = await hifi.trackManifests(track.id);
+      const urls = await hifi.trackManifests(track.id, this.guildId);
       const streamUrl = urls[0];
       if (!streamUrl) throw new Error(`No stream URL returned for track ${track.id}`);
 
@@ -397,8 +397,8 @@ class GuildPlayer {
 
   async _playAutoplay() {
     try {
-      let recs = await hifi.recommendations(this.lastTrack.id);
-      if (!recs.length) recs = await hifi.mix(this.lastTrack.id);
+      let recs = await hifi.recommendations(this.lastTrack.id, this.guildId);
+      if (!recs.length) recs = await hifi.mix(this.lastTrack.id, this.guildId);
       const filtered = recs.filter(t => t && t.id !== this.lastTrack?.id);
       if (!filtered.length) {
         this._startIdleTimer();

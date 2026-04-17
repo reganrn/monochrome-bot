@@ -93,8 +93,8 @@ Connection and API:
 - `/join`
 - `/leave`
 - `/instances list`
-- `/instances add <url>`
-- `/instances reset`
+- `/instances add <url>` -> adds a custom API instance for the current server
+- `/instances reset` -> restores the default API instance order for the current server
 - `/help`
 
 ## Download Behavior

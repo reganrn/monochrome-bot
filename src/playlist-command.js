@@ -116,7 +116,7 @@ function createPlaylistCommand({
 
         let tracks;
         try {
-          tracks = await resolve(query, interaction.user.username);
+          tracks = await resolve(query, interaction.user.username, interaction.guildId);
         } catch (err) {
           return interaction.reply({ embeds: [errorEmbed(`Could not resolve: ${err.message}`)], ephemeral: true });
         }

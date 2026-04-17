@@ -31,11 +31,8 @@ const DEFAULT_INSTANCES = [
   'https://monochrome-api.samidy.com',
 ];
 
-let instances    = [...DEFAULT_INSTANCES];
-let currentIndex = 0;
-
-// Per-process cache: Map<url, { data, ts }>
-const cache = new Map();
+const DEFAULT_SCOPE = '__default__';
+const scopeStates = new Map();
 const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 
 // ─── HTTP client ─────────────────────────────────────────────────────────────
@@ -46,18 +43,19 @@ const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
  * @param {object} params query string params
  * @returns {Promise<any>} parsed JSON response body
  */
-async function get(path, params = {}) {
+async function get(path, params = {}, scope = null) {
+  const state = getScopeState(scope);
   const cacheKey = path + '?' + new URLSearchParams(params).toString();
-  const cached   = cache.get(cacheKey);
+  const cached   = state.cache.get(cacheKey);
   if (cached && Date.now() - cached.ts < CACHE_TTL_MS) {
     return cached.data;
   }
 
   let lastErr;
   // Try every instance starting from currentIndex, wrap around
-  for (let attempt = 0; attempt < instances.length; attempt++) {
-    const idx  = (currentIndex + attempt) % instances.length;
-    const base = instances[idx];
+  for (let attempt = 0; attempt < state.instances.length; attempt++) {
+    const idx  = (state.currentIndex + attempt) % state.instances.length;
+    const base = state.instances[idx];
     try {
       const resp = await axios.get(base + path, {
         params,
@@ -70,10 +68,10 @@ async function get(path, params = {}) {
       });
 
       // Mark this instance as working
-      currentIndex = idx;
+      state.currentIndex = idx;
 
       const data = resp.data;
-      cache.set(cacheKey, { data, ts: Date.now() });
+      state.cache.set(cacheKey, { data, ts: Date.now() });
       return data;
 
     } catch (err) {
@@ -86,11 +84,12 @@ async function get(path, params = {}) {
 }
 
 /** Bypass cache — used for stream manifests (they expire quickly) */
-async function getNoCache(path, params = {}) {
+async function getNoCache(path, params = {}, scope = null) {
+  const state = getScopeState(scope);
   let lastErr;
-  for (let attempt = 0; attempt < instances.length; attempt++) {
-    const idx  = (currentIndex + attempt) % instances.length;
-    const base = instances[idx];
+  for (let attempt = 0; attempt < state.instances.length; attempt++) {
+    const idx  = (state.currentIndex + attempt) % state.instances.length;
+    const base = state.instances[idx];
     try {
       const resp = await axios.get(base + path, {
         params,
@@ -101,7 +100,7 @@ async function getNoCache(path, params = {}) {
           'Referer':    'https://monochrome.tf/',
         },
       });
-      currentIndex = idx;
+      state.currentIndex = idx;
       return resp.data;
     } catch (err) {
       lastErr = err;
@@ -116,11 +115,11 @@ async function getNoCache(path, params = {}) {
  * Search for tracks, albums, and artists.
  * @returns {{ tracks: TrackItem[], albums: AlbumItem[], artists: ArtistItem[] }}
  */
-async function search(query, limit = 10) {
+async function search(query, limit = 10, scope = null) {
   const [tracksResp, artistsResp, albumsResp] = await Promise.allSettled([
-    get('/search', { s: query }),
-    get('/search', { a: query }),
-    get('/search', { al: query }),
+    get('/search', { s: query }, scope),
+    get('/search', { a: query }, scope),
+    get('/search', { al: query }, scope),
   ]);
 
   const trackData  = getSettledValue(tracksResp);
@@ -147,9 +146,9 @@ async function search(query, limit = 10) {
  * @param {number|string} id  TIDAL track ID
  * @returns {TrackInfo}
  */
-async function track(id) {
+async function track(id, scope = null) {
   try {
-    const data = await get('/track/', { id });
+    const data = await get('/track/', { id }, scope);
     const d = data?.data ?? data;
     const candidate = extractTrackMetadata(d);
     if (candidate) {
@@ -171,8 +170,8 @@ async function track(id) {
  * @param {number|string} id  TIDAL track ID
  * @returns {string[]}
  */
-async function trackManifests(id) {
-  const data = await getNoCache('/track/', { id, quality: 'LOSSLESS' });
+async function trackManifests(id, scope = null) {
+  const data = await getNoCache('/track/', { id, quality: 'LOSSLESS' }, scope);
   const d = data?.data ?? data;
 
   const directUrls = [
@@ -227,8 +226,8 @@ async function trackManifests(id) {
  * Fetch album metadata + track listing.
  * @returns {{ info: AlbumInfo, tracks: TrackInfo[] }}
  */
-async function album(id) {
-  const data = await get('/album/', { id });
+async function album(id, scope = null) {
+  const data = await get('/album/', { id }, scope);
   const d    = data?.data ?? data;
   return {
     info:   normaliseAlbumItem(d),
@@ -240,10 +239,10 @@ async function album(id) {
  * Fetch artist info + top tracks.
  * @returns {{ info: ArtistInfo, topTracks: TrackInfo[] }}
  */
-async function artist(id) {
+async function artist(id, scope = null) {
   const [detailData, contentData] = await Promise.all([
-    get('/artist/', { id }),
-    get('/artist/', { f: id }).catch(() => null),
+    get('/artist/', { id }, scope),
+    get('/artist/', { f: id }, scope).catch(() => null),
   ]);
 
   const d = detailData?.artist ?? detailData?.data ?? detailData;
@@ -257,8 +256,8 @@ async function artist(id) {
  * Similar artists for a given artist ID.
  * @returns {ArtistInfo[]}
  */
-async function similarArtists(id) {
-  const data = await get('/artist/similar', { id });
+async function similarArtists(id, scope = null) {
+  const data = await get('/artist/similar', { id }, scope);
   const d    = data?.data ?? data;
   return (d?.items ?? d ?? []).map(normaliseArtistItem);
 }
@@ -267,8 +266,8 @@ async function similarArtists(id) {
  * Track recommendations (for autoplay).
  * @returns {TrackInfo[]}
  */
-async function recommendations(id) {
-  const data = await get('/recommendations', { id });
+async function recommendations(id, scope = null) {
+  const data = await get('/recommendations', { id }, scope);
   const d    = data?.data ?? data;
   return (d?.items ?? []).map(i => normaliseTrack(i?.track ?? i));
 }
@@ -277,8 +276,8 @@ async function recommendations(id) {
  * Fetch a radio mix for a track (infinite recommendation radio).
  * @returns {TrackInfo[]}
  */
-async function mix(id) {
-  const data = await get('/mix', { id });
+async function mix(id, scope = null) {
+  const data = await get('/mix', { id }, scope);
   const d    = data?.data ?? data;
   return (d?.tracks?.items ?? d?.items ?? []).map(i => normaliseTrack(i?.track ?? i));
 }
@@ -287,8 +286,8 @@ async function mix(id) {
  * Fetch playlist tracks by UUID.
  * @returns {TrackInfo[]}
  */
-async function playlist(id) {
-  const data = await get('/playlist/', { id });
+async function playlist(id, scope = null) {
+  const data = await get('/playlist/', { id }, scope);
   const d    = data?.data ?? data;
   return (d?.tracks?.items ?? d?.items ?? []).map(i => normaliseTrack(i?.track ?? i)).filter(Boolean);
 }
@@ -296,9 +295,9 @@ async function playlist(id) {
 /**
  * @returns {{ lyrics: string, subtitles: string | null } | null}
  */
-async function lyrics(id) {
+async function lyrics(id, scope = null) {
   try {
-    const data = await get('/lyrics', { id });
+    const data = await get('/lyrics', { id }, scope);
     const d    = data?.data ?? data;
     const payload = d?.lyrics && typeof d.lyrics === 'object' ? d.lyrics : d;
     return {
@@ -330,20 +329,42 @@ function monochromeUrl(id, type = 'track') {
 
 // ─── Instance management ──────────────────────────────────────────────────────
 
-function setInstances(urls) {
+function setInstances(urls, scope = null) {
   if (Array.isArray(urls) && urls.length > 0) {
-    instances    = urls;
-    currentIndex = 0;
-    clearCache();
+    const state = getScopeState(scope);
+    state.instances = [...urls];
+    state.currentIndex = 0;
+    clearCache(scope);
   }
 }
 
-function getInstances() {
-  return instances.map((url, i) => ({ url, active: i === currentIndex }));
+function getInstances(scope = null) {
+  const state = getScopeState(scope);
+  return state.instances.map((url, i) => ({ url, active: i === state.currentIndex }));
 }
 
-function clearCache() {
-  cache.clear();
+function resetInstances(scope = null) {
+  const state = getScopeState(scope);
+  state.instances = [...DEFAULT_INSTANCES];
+  state.currentIndex = 0;
+  clearCache(scope);
+}
+
+function clearCache(scope = null) {
+  const state = getScopeState(scope);
+  state.cache.clear();
+}
+
+function getScopeState(scope = null) {
+  const key = scope == null ? DEFAULT_SCOPE : String(scope);
+  if (!scopeStates.has(key)) {
+    scopeStates.set(key, {
+      instances: [...DEFAULT_INSTANCES],
+      currentIndex: 0,
+      cache: new Map(),
+    });
+  }
+  return scopeStates.get(key);
 }
 
 function extractTrackMetadata(value) {
@@ -564,6 +585,7 @@ module.exports = {
   monochromeUrl,
   setInstances,
   getInstances,
+  resetInstances,
   clearCache,
   normaliseTrack,
 };

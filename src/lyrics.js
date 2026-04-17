@@ -25,14 +25,14 @@ function getGenius() {
  * @param {string}        artist    Artist name (for Genius fallback)
  * @returns {Promise<{ lyrics: string, title: string, artist: string, url: string | null, synced: boolean } | null>}
  */
-async function fetchLyrics(trackId, title = '', artist = '') {
+async function fetchLyrics(trackId, title = '', artist = '', scope = null) {
   const resolvedTitle = String(title ?? '').trim();
   const resolvedArtist = String(artist ?? '').trim();
 
   // ── 1. Hi-Fi / TIDAL built-in lyrics ───────────────────────────────────────
   if (trackId) {
     try {
-      const result = await hifi.lyrics(trackId);
+      const result = await hifi.lyrics(trackId, scope);
       const tidalLyrics = result?.lyrics ?? result?.subtitles ?? '';
       if (tidalLyrics) {
         return {

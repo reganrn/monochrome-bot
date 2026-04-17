@@ -5,6 +5,7 @@ const path = require('path');
 
 const DATA_DIR = path.resolve(__dirname, '..', 'data');
 const STORE_PATH = path.join(DATA_DIR, 'playlists.json');
+const BACKUP_PATH = path.join(DATA_DIR, 'playlists.json.bak');
 const MAX_PLAYLIST_NAME_LENGTH = 50;
 const MAX_PLAYLISTS_PER_GUILD = 50;
 
@@ -186,28 +187,37 @@ function toPlaylistKey(name) {
 
 function readStore() {
   ensureDataDir();
-  if (!fs.existsSync(STORE_PATH)) {
-    return { guilds: {} };
-  }
-
-  const raw = fs.readFileSync(STORE_PATH, 'utf8').trim();
-  if (!raw) {
-    return { guilds: {} };
-  }
-
-  const parsed = JSON.parse(raw);
-  return parsed && typeof parsed === 'object'
-    ? parsed
-    : { guilds: {} };
+  return readStoreFile(STORE_PATH) ?? readStoreFile(BACKUP_PATH) ?? { guilds: {} };
 }
 
 function writeStore(store) {
   ensureDataDir();
-  fs.writeFileSync(STORE_PATH, `${JSON.stringify(store, null, 2)}\n`, 'utf8');
+  const serialised = `${JSON.stringify(store, null, 2)}\n`;
+  fs.writeFileSync(STORE_PATH, serialised, 'utf8');
+  fs.writeFileSync(BACKUP_PATH, serialised, 'utf8');
 }
 
 function ensureDataDir() {
   fs.mkdirSync(DATA_DIR, { recursive: true });
+}
+
+function readStoreFile(filePath) {
+  if (!fs.existsSync(filePath)) {
+    return null;
+  }
+
+  const raw = fs.readFileSync(filePath, 'utf8').trim();
+  if (!raw) {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' ? parsed : null;
+  } catch (err) {
+    console.error(`[Playlists] Failed to parse ${path.basename(filePath)}: ${err.message}`);
+    return null;
+  }
 }
 
 module.exports = {

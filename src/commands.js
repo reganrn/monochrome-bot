@@ -1,6 +1,6 @@
 'use strict';
 
-const { SlashCommandBuilder, ActionRowBuilder, StringSelectMenuBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder } = require('discord.js');
+const { SlashCommandBuilder, ActionRowBuilder, StringSelectMenuBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder, PermissionsBitField } = require('discord.js');
 const { GuildPlayer } = require('./player');
 const { resolve, searchResults }       = require('./search');
 const { fetchLyrics }                  = require('./lyrics');
@@ -62,6 +62,71 @@ function requirePlayer(interaction, client) {
     return null;
   }
   return player;
+}
+
+function requireManageGuild(interaction) {
+  if (!interaction.inGuild()) {
+    interaction.reply({ embeds: [errorEmbed('This command can only be used in a server.')], ephemeral: true }).catch(() => {});
+    return false;
+  }
+
+  if (interaction.memberPermissions?.has(PermissionsBitField.Flags.ManageGuild)) {
+    return true;
+  }
+
+  interaction.reply({ embeds: [errorEmbed('You need the **Manage Server** permission to change API instances.')], ephemeral: true }).catch(() => {});
+  return false;
+}
+
+function normaliseInstanceUrl(value) {
+  let parsed;
+  try {
+    parsed = new URL(String(value ?? '').trim());
+  } catch {
+    throw new Error('Instance URL must be a valid HTTPS URL.');
+  }
+
+  if (parsed.protocol !== 'https:') {
+    throw new Error('Instance URL must use HTTPS.');
+  }
+
+  if (parsed.username || parsed.password) {
+    throw new Error('Instance URL must not include credentials.');
+  }
+
+  if (isPrivateInstanceHost(parsed.hostname)) {
+    throw new Error('Instance URL must point to a public host.');
+  }
+
+  parsed.hash = '';
+  parsed.search = '';
+  parsed.pathname = parsed.pathname.replace(/\/+$/, '');
+  return parsed.toString().replace(/\/$/, '');
+}
+
+function isPrivateInstanceHost(hostname) {
+  const host = String(hostname ?? '').toLowerCase();
+  if (!host) return true;
+  if (host === 'localhost' || host.endsWith('.localhost') || host.endsWith('.local') || host === '::1') {
+    return true;
+  }
+
+  const ipv4 = /^(\d{1,3})(?:\.(\d{1,3})){3}$/.exec(host);
+  if (!ipv4) return false;
+
+  const parts = host.split('.').map(Number);
+  if (parts.some(part => Number.isNaN(part) || part < 0 || part > 255)) {
+    return true;
+  }
+
+  return (
+    parts[0] === 0 ||
+    parts[0] === 10 ||
+    parts[0] === 127 ||
+    (parts[0] === 169 && parts[1] === 254) ||
+    (parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31) ||
+    (parts[0] === 192 && parts[1] === 168)
+  );
 }
 
 function getPlaylistSnapshot(player) {
@@ -170,7 +235,7 @@ const commands = [
 
       let tracks;
       try {
-        tracks = await resolve(query, interaction.user.username);
+        tracks = await resolve(query, interaction.user.username, interaction.guildId);
       } catch (err) {
         return interaction.editReply({ embeds: [errorEmbed(`Could not resolve: ${err.message}`)] });
       }
@@ -240,7 +305,7 @@ const commands = [
       const position = interaction.options.getInteger('position') ?? 1;
       let tracks;
       try {
-        tracks = await resolve(query, interaction.user.username);
+        tracks = await resolve(query, interaction.user.username, interaction.guildId);
       } catch (err) {
         return interaction.editReply({ embeds: [errorEmbed(`Could not resolve: ${err.message}`)] });
       }
@@ -302,7 +367,7 @@ const commands = [
 
       let results;
       try {
-        results = await searchResults(query, limit);
+        results = await searchResults(query, limit, interaction.guildId);
       } catch (err) {
         return interaction.editReply({ embeds: [errorEmbed(err.message)] });
       }
@@ -339,9 +404,21 @@ const commands = [
         const picked = results.find(r => r.url === url);
         if (!picked) return;
 
-        const player = getOrCreatePlayer(interaction.guildId, client);
+        const existingPlayer = client.players.get(interaction.guildId);
+        const player = existingPlayer ?? getOrCreatePlayer(interaction.guildId, client);
         if (!player.connection || player.voiceChannel?.id !== vc.id) {
-          try { await player.connect(vc, interaction.channel); } catch {}
+          try {
+            await player.connect(vc, interaction.channel);
+          } catch (err) {
+            if (!existingPlayer) {
+              client.players.delete(interaction.guildId);
+            }
+            await interaction.editReply({
+              embeds: [errorEmbed(err.message)],
+              components: [],
+            });
+            return;
+          }
         }
         player.textChannel = interaction.channel;
 
@@ -622,7 +699,7 @@ const commands = [
       const manual = interaction.options.getString('song');
       if (manual) {
         try {
-          const tracks = await resolve(manual, interaction.user.username);
+          const tracks = await resolve(manual, interaction.user.username, interaction.guildId);
           const track = tracks[0];
           title   = track?.title ?? manual.trim();
           artist  = track?.artist ?? '';
@@ -642,7 +719,7 @@ const commands = [
         trackId = player.currentTrack.id;
       }
 
-      const result = await fetchLyrics(trackId, title, artist);
+      const result = await fetchLyrics(trackId, title, artist, interaction.guildId);
       if (!result) {
         const label = artist
           ? `${artist} - ${title || manual?.trim() || 'that track'}`
@@ -698,7 +775,7 @@ const commands = [
       const query = interaction.options.getString('query');
       if (query) {
         try {
-          const tracks = await resolve(query, interaction.user.username);
+          const tracks = await resolve(query, interaction.user.username, interaction.guildId);
           track = tracks[0];
         } catch (err) {
           return interaction.editReply({ embeds: [errorEmbed(`Could not find: ${err.message}`)] });
@@ -860,7 +937,7 @@ const commands = [
       const { EmbedBuilder } = require('discord.js');
 
       if (sub === 'list') {
-        const list = hifi.getInstances();
+        const list = hifi.getInstances(interaction.guildId);
         const lines = list.map((i, n) =>
           `${i.active ? '✅' : '⬜'} \`${n + 1}.\` ${i.url}${i.active ? ' ← **active**' : ''}`,
         ).join('\n');
@@ -870,39 +947,34 @@ const commands = [
               .setColor(0x2b2d31)
               .setTitle('🌐  Hi-Fi API Instances')
               .setDescription(lines)
-              .setFooter({ text: 'The bot tries each instance in order, using the first healthy one.' }),
+              .setFooter({ text: 'The order applies only to this server. The bot tries each instance until one responds.' }),
           ],
           ephemeral: true,
         });
       }
 
       if (sub === 'add') {
-        const url = interaction.options.getString('url', true).replace(/\/$/, '');
-        const current = hifi.getInstances().map(i => i.url);
+        if (!requireManageGuild(interaction)) return;
+
+        let url;
+        try {
+          url = normaliseInstanceUrl(interaction.options.getString('url', true));
+        } catch (err) {
+          return interaction.reply({ embeds: [errorEmbed(err.message)], ephemeral: true });
+        }
+
+        const current = hifi.getInstances(interaction.guildId).map(i => i.url);
         if (current.includes(url)) {
           return interaction.reply({ embeds: [warnEmbed(`\`${url}\` is already in the list.`)], ephemeral: true });
         }
-        hifi.setInstances([url, ...current]);
-        return interaction.reply({ embeds: [successEmbed(`Added \`${url}\` as the priority instance.`)], ephemeral: true });
+        hifi.setInstances([url, ...current], interaction.guildId);
+        return interaction.reply({ embeds: [successEmbed(`Added \`${url}\` as the priority instance for this server.`)], ephemeral: true });
       }
 
       if (sub === 'reset') {
-        hifi.setInstances([
-          'https://triton.squid.wtf',
-          'https://vogel.qqdl.site',
-          'https://katze.qqdl.site',
-          'https://hund.qqdl.site',
-          'https://wolf.qqdl.site',
-          'https://maus.qqdl.site',
-          'https://hifi.p1nkhamster.xyz',
-          'https://arran.monochrome.tf',
-          'https://eu-central.monochrome.tf',
-          'https://us-west.monochrome.tf',
-          'https://api.monochrome.tf',
-          'https://monochrome-api.samidy.com',
-        ]);
-        hifi.clearCache();
-        return interaction.reply({ embeds: [successEmbed('Reset to default Hi-Fi API instances.')], ephemeral: true });
+        if (!requireManageGuild(interaction)) return;
+        hifi.resetInstances(interaction.guildId);
+        return interaction.reply({ embeds: [successEmbed('Reset this server to the default Hi-Fi API instances.')], ephemeral: true });
       }
     },
   },
@@ -967,7 +1039,7 @@ const commands = [
           },
           {
             name: '🌐  Instances',
-            value: '`/instances list` — view API instances\n`/instances add <url>` — add custom instance\n`/instances reset` — restore defaults',
+            value: '`/instances list` — view this server\'s API instances\n`/instances add <url>` — add a custom instance for this server\n`/instances reset` — restore this server\'s defaults',
           },
         )
         .setFooter({ text: 'Use slash commands for playback and queue control.' });
