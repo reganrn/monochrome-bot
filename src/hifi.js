@@ -52,6 +52,7 @@ async function get(path, params = {}, scope = null) {
   }
 
   let lastErr;
+  const failures = [];
   // Try every instance starting from currentIndex, wrap around
   for (let attempt = 0; attempt < state.instances.length; attempt++) {
     const idx  = (state.currentIndex + attempt) % state.instances.length;
@@ -76,17 +77,19 @@ async function get(path, params = {}, scope = null) {
 
     } catch (err) {
       lastErr = err;
+      failures.push(buildFailureRecord(base, err));
       console.warn(`[HiFi] Instance ${base} failed (${err.response?.status ?? err.code}), trying next…`);
     }
   }
 
-  throw new Error(`All Hi-Fi API instances failed. Last error: ${lastErr?.message}`);
+  throw buildRequestError(path, failures, params, lastErr);
 }
 
 /** Bypass cache — used for stream manifests (they expire quickly) */
 async function getNoCache(path, params = {}, scope = null) {
   const state = getScopeState(scope);
   let lastErr;
+  const failures = [];
   for (let attempt = 0; attempt < state.instances.length; attempt++) {
     const idx  = (state.currentIndex + attempt) % state.instances.length;
     const base = state.instances[idx];
@@ -104,9 +107,10 @@ async function getNoCache(path, params = {}, scope = null) {
       return resp.data;
     } catch (err) {
       lastErr = err;
+      failures.push(buildFailureRecord(base, err));
     }
   }
-  throw new Error(`All Hi-Fi API instances failed. Last error: ${lastErr?.message}`);
+  throw buildRequestError(path, failures, params, lastErr);
 }
 
 // ─── Endpoints ────────────────────────────────────────────────────────────────
@@ -365,6 +369,99 @@ function getScopeState(scope = null) {
     });
   }
   return scopeStates.get(key);
+}
+
+function buildRequestError(path, failures, params = {}, lastErr = null) {
+  const summary = summariseFailures(failures);
+  const lastMessage = lastErr?.message ?? 'Unknown error';
+
+  if (isManifestRequest(path, params) && looksLikePlaybackOutage(failures)) {
+    const trackHint = params?.id ? ` for track ${params.id}` : '';
+    return new Error(
+      `Playback is currently unavailable${trackHint}. All configured Hi-Fi instances rejected or failed the stream-manifest request (${summary}). ` +
+      'Search may still work, but audio cannot start until a working playback instance is available. ' +
+      'Add a working private Hi-Fi instance with /instances add <url> or try again later.',
+    );
+  }
+
+  return new Error(`All Hi-Fi API instances failed for ${path} (${summary}). Last error: ${lastMessage}`);
+}
+
+function buildFailureRecord(base, err) {
+  const detail = typeof err?.response?.data?.detail === 'string'
+    ? err.response.data.detail.trim()
+    : '';
+  const status = err?.response?.status ?? null;
+  const code = err?.code ?? null;
+
+  return {
+    base,
+    status,
+    code,
+    detail,
+    message: detail || err?.message || 'Unknown error',
+  };
+}
+
+function summariseFailures(failures) {
+  if (!failures?.length) {
+    return 'no instance details available';
+  }
+
+  const counts = new Map();
+  for (const failure of failures) {
+    const label = classifyFailure(failure);
+    counts.set(label, (counts.get(label) ?? 0) + 1);
+  }
+
+  return Array.from(counts.entries())
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 4)
+    .map(([label, count]) => `${label} x${count}`)
+    .join(', ');
+}
+
+function classifyFailure(failure) {
+  if (!failure) return 'error';
+  if (failure.status === 403 && /upstream api error/i.test(failure.detail)) {
+    return '403 Upstream API error';
+  }
+  if (failure.status === 403) {
+    return '403 Forbidden';
+  }
+  if (failure.status === 502) {
+    return '502 Bad Gateway';
+  }
+  if (failure.code === 'ECONNABORTED' || /timeout/i.test(failure.message)) {
+    return 'timeout';
+  }
+  if (failure.status) {
+    return `HTTP ${failure.status}`;
+  }
+  if (failure.code) {
+    return failure.code;
+  }
+  return 'error';
+}
+
+function isManifestRequest(path, params = {}) {
+  return path === '/track/' && typeof params?.quality === 'string' && params.quality.length > 0;
+}
+
+function looksLikePlaybackOutage(failures) {
+  if (!failures?.length) {
+    return false;
+  }
+
+  return failures.every(failure => {
+    const label = classifyFailure(failure);
+    return (
+      label === '403 Upstream API error' ||
+      label === '403 Forbidden' ||
+      label === '502 Bad Gateway' ||
+      label === 'timeout'
+    );
+  });
 }
 
 function extractTrackMetadata(value) {
