@@ -206,7 +206,7 @@ const commands = [
       .setDescription('▶️  Play a song, album, or playlist')
       .addStringOption(o =>
         o.setName('query')
-          .setDescription('Song name, TIDAL URL, Monochrome share URL, or playlist')
+          .setDescription('Song name, TIDAL URL, Monochrome share URL, YouTube video URL, or playlist')
           .setRequired(true))
       .addBooleanOption(o =>
         o.setName('next')
@@ -288,7 +288,7 @@ const commands = [
       .setDescription('↪️  Insert a song, album, or playlist at a queue position after the current track')
       .addStringOption(o =>
         o.setName('query')
-          .setDescription('Song name, TIDAL URL, Monochrome share URL, or playlist')
+          .setDescription('Song name, TIDAL URL, Monochrome share URL, YouTube video URL, or playlist')
           .setRequired(true))
       .addIntegerOption(o =>
         o.setName('position')
@@ -788,6 +788,12 @@ const commands = [
         track = player.currentTrack;
       }
 
+      if (track?.source !== 'tidal') {
+        return interaction.editReply({
+          embeds: [errorEmbed('Downloads are only available for TIDAL / Monochrome tracks.')],
+        });
+      }
+
       await interaction.editReply({ embeds: [buildDownloadEmbed(track)] });
 
       try {
@@ -995,8 +1001,8 @@ const commands = [
           {
             name: '▶️  Playback',
             value: [
-              '`/play <query>` — Play a song, TIDAL URL, Monochrome share URL, or playlist',
-              '`/insert <query> [position]` — Insert after the current track at a queue position',
+              '`/play <query>` — Play a song, TIDAL URL, Monochrome share URL, YouTube video URL, or playlist',
+              '`/insert <query> [position]` — Insert a song, URL, or playlist after the current track',
               '`/search <query>` — Search and pick from results',
               '`/pause` — Pause',
               '`/resume` — Resume',
@@ -1035,7 +1041,7 @@ const commands = [
           },
           {
             name: '📝  Sources',
-            value: 'TIDAL catalog via the **Hi-Fi API** (Monochrome backend)\nSupports TIDAL track/album/artist/playlist URLs, Monochrome share URLs, or plain search',
+            value: 'TIDAL catalog via the **Hi-Fi API** (Monochrome backend)\nSupports TIDAL track/album/artist/playlist URLs, Monochrome share URLs, direct YouTube video URLs, or plain search',
           },
           {
             name: '🌐  Instances',

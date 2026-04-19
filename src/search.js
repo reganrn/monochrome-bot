@@ -1,6 +1,7 @@
 'use strict';
 
 const hifi = require('./hifi');
+const youtube = require('./youtube');
 
 /**
  * Resolve a user query into an array of TrackInfo objects.
@@ -15,6 +16,13 @@ const hifi = require('./hifi');
  */
 async function resolve(query, requestedBy = null, scope = null) {
   const q = query.trim();
+
+  if (youtube.isYouTubeUrl(q)) {
+    return youtube.resolveVideo(q, requestedBy);
+  }
+  if (youtube.isYouTubeHostUrl(q)) {
+    throw new Error('Only direct YouTube video URLs are supported.');
+  }
 
   // ── TIDAL track URL ─────────────────────────────────────────────────────────
   const tidalTrack = q.match(/tidal\.com\/(?:browse\/)?track\/(\d+)/i);

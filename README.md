@@ -12,8 +12,8 @@ User -> Discord bot -> Hi-Fi API (/track/) -> TIDAL CDN -> ffmpeg -> Discord voi
 
 | Category | Features |
 |---|---|
-| Streaming | TIDAL catalog playback through the Hi-Fi API |
-| Sources | TIDAL URLs, Monochrome share URLs, plain text search |
+| Streaming | TIDAL catalog playback through the Hi-Fi API, plus direct YouTube video URL playback |
+| Sources | TIDAL URLs, Monochrome share URLs, YouTube video URLs, plain text search |
 | Queue | Add, insert, remove, move, clear, shuffle |
 | Playback | Play, pause, resume, skip, stop, seek |
 | Modes | Repeat (off/track/queue), autoplay |
@@ -27,6 +27,7 @@ Prerequisites:
 
 - Node.js 22.12+
 - `ffmpeg` available on the system, or provided by `ffmpeg-static`
+- `yt-dlp` available on the system `PATH` for direct YouTube URL playback, or set via `YTDLP_PATH`
 
 Install:
 
@@ -44,6 +45,7 @@ DEFAULT_VOLUME=80
 MAX_QUEUE_SIZE=500
 ALONE_TIMEOUT=30
 IDLE_TIMEOUT=300
+YTDLP_PATH=
 ```
 
 Deploy slash commands:
@@ -62,7 +64,7 @@ npm start
 
 Playback:
 
-- `/play <query>`
+- `/play <query>` -> supports TIDAL, Monochrome, plain text, and direct YouTube video URLs
 - `/insert <query> [position]`
 - `/search <query>`
 - `/pause`
@@ -87,6 +89,11 @@ Music tools:
 
 - `/lyrics [song]`
 - `/download [query]` -> returns Monochrome and TIDAL links for the requested track
+
+Notes:
+
+- YouTube support is URL-only. Plain text search still resolves through the Hi-Fi / TIDAL path.
+- Playlist and channel YouTube URLs are not supported. Use a direct video URL.
 
 Connection and API:
 
@@ -138,4 +145,5 @@ src/
   lyrics.js
   player.js
   search.js
+  youtube.js
 ```

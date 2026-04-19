@@ -13,6 +13,7 @@ const {
 const { execSync } = require('child_process');
 const { PassThrough } = require('stream');
 const hifi = require('./hifi');
+const youtube = require('./youtube');
 
 const DEFAULT_VOLUME = parseInt(process.env.DEFAULT_VOLUME ?? '80', 10) / 100;
 const MAX_QUEUE_SIZE = parseInt(process.env.MAX_QUEUE_SIZE ?? '500', 10);
@@ -22,6 +23,10 @@ const EMBED_COLOR = 0x2b2d31;
 const DEFAULT_OPUS_BITRATE = 128000;
 const MIN_OPUS_BITRATE = 64000;
 const MAX_OPUS_BITRATE = 256000;
+const MONOCHROME_INPUT_HEADERS = {
+  Origin: 'https://monochrome.tf',
+  Referer: 'https://monochrome.tf/',
+};
 
 function resolveFfmpegPath() {
   try {
@@ -34,6 +39,48 @@ function resolveFfmpegPath() {
     return execSync(which).toString().trim().split('\n')[0];
   } catch {}
   return null;
+}
+
+function shouldSendMonochromeHeaders(streamUrl, scope = null) {
+  let streamHost;
+  try {
+    streamHost = new URL(streamUrl).hostname.toLowerCase();
+  } catch {
+    return false;
+  }
+
+  return hifi.getInstances(scope).some(instance => {
+    try {
+      return new URL(instance.url).hostname.toLowerCase() === streamHost;
+    } catch {
+      return false;
+    }
+  });
+}
+
+function buildFfmpegInputHeaders(streamUrl, headers = null, scope = null) {
+  const merged = new Map();
+
+  if (shouldSendMonochromeHeaders(streamUrl, scope)) {
+    for (const [name, value] of Object.entries(MONOCHROME_INPUT_HEADERS)) {
+      merged.set(name.toLowerCase(), { name, value });
+    }
+  }
+
+  if (headers && typeof headers === 'object') {
+    for (const [name, value] of Object.entries(headers)) {
+      if (typeof value === 'undefined' || value === null || value === '') continue;
+      merged.set(String(name).toLowerCase(), { name: String(name), value: String(value) });
+    }
+  }
+
+  if (!merged.size) return [];
+
+  const headerBlock = Array.from(merged.values())
+    .map(({ name, value }) => `${name}: ${value}`)
+    .join('\r\n');
+
+  return ['-headers', `${headerBlock}\r\n`];
 }
 
 const FFMPEG_PATH = resolveFfmpegPath();
@@ -63,6 +110,7 @@ class GuildPlayer {
     this.onDestroy = typeof options.onDestroy === 'function' ? options.onDestroy : null;
     this._ffmpegProcess = null;
     this._sourceStream = null;
+    this._inputStream = null;
 
     this.audioPlayer = createAudioPlayer({
       behaviors: { noSubscriber: NoSubscriberBehavior.Pause },
@@ -253,11 +301,8 @@ class GuildPlayer {
     this.cancelAloneTimer();
     this._cleanupPlaybackResources();
     try {
-      const urls = await hifi.trackManifests(track.id, this.guildId);
-      const streamUrl = urls[0];
-      if (!streamUrl) throw new Error(`No stream URL returned for track ${track.id}`);
-
-      const resource = await this._createResource(streamUrl, seekSeconds);
+      const input = await this._resolvePlaybackInput(track, seekSeconds);
+      const resource = await this._createResource(input, seekSeconds);
 
       this.currentTrack = track;
       this.lastTrack = track;
@@ -280,19 +325,44 @@ class GuildPlayer {
     }
   }
 
-  async _createResource(streamUrl, seekSeconds = 0) {
+  async _resolvePlaybackInput(track, seekSeconds = 0) {
+    if (track?.source === 'youtube') {
+      const source = await youtube.getPlaybackSource(track.id);
+      return { kind: 'url', ...source };
+    }
+
+    const urls = await hifi.trackManifests(track.id, this.guildId);
+    const url = urls[0];
+    if (!url) {
+      throw new Error(`No stream URL returned for track ${track.id}`);
+    }
+
+    return {
+      kind: 'url',
+      url,
+    };
+  }
+
+  async _createResource(input, seekSeconds = 0) {
     if (!FFMPEG_PATH) {
       throw new Error('ffmpeg was not found. Install ffmpeg or ensure ffmpeg-static is available.');
     }
-    return this._createFfmpegResource(streamUrl, seekSeconds);
+
+    if (input?.kind === 'stream') {
+      return this._createFfmpegResourceFromStream(input.stream);
+    }
+
+    return this._createFfmpegResource(input?.url, seekSeconds, input?.headers);
   }
 
-  _createFfmpegResource(streamUrl, seekSeconds) {
+  _createFfmpegResource(streamUrl, seekSeconds, headers = null) {
     const { spawn } = require('child_process');
     const bitrate = `${Math.round(this._getTargetBitrate() / 1000)}k`;
+    const inputHeaders = buildFfmpegInputHeaders(streamUrl, headers, this.guildId);
     const args = [
       '-reconnect', '1', '-reconnect_streamed', '1', '-reconnect_delay_max', '5',
-      '-headers', 'Origin: https://monochrome.tf\r\nReferer: https://monochrome.tf/\r\n',
+      // TIDAL CDN stream URLs reject Monochrome Origin/Referer headers with 403.
+      ...inputHeaders,
       ...(seekSeconds > 0 ? ['-ss', String(seekSeconds)] : []),
       '-i', streamUrl,
       '-vn',
@@ -333,12 +403,69 @@ class GuildPlayer {
     });
   }
 
+  _createFfmpegResourceFromStream(inputStream) {
+    const { spawn } = require('child_process');
+    const bitrate = `${Math.round(this._getTargetBitrate() / 1000)}k`;
+    const args = [
+      '-i', 'pipe:0',
+      '-vn',
+      '-af', `volume=${this.volume.toFixed(4)}`,
+      '-acodec', 'libopus',
+      '-application', 'audio',
+      '-vbr', 'on',
+      '-compression_level', '10',
+      '-b:a', bitrate,
+      '-ar', '48000',
+      '-ac', '2',
+      '-f', 'opus',
+      '-loglevel', 'error',
+      'pipe:1',
+    ];
+
+    const ff = spawn(FFMPEG_PATH, args, { stdio: ['pipe', 'pipe', 'pipe'] });
+    const pass = new PassThrough();
+    let stderr = '';
+
+    this._ffmpegProcess = ff;
+    this._sourceStream = pass;
+    this._inputStream = inputStream;
+
+    inputStream.pipe(ff.stdin);
+    ff.stdout.pipe(pass);
+
+    inputStream.on('error', err => {
+      try { ff.stdin.destroy(err); } catch {}
+      if (!pass.destroyed) {
+        pass.destroy(err);
+      }
+    });
+    ff.stderr.on('data', chunk => {
+      stderr += chunk.toString();
+    });
+    ff.on('error', err => pass.destroy(err));
+    ff.on('close', code => {
+      this._ffmpegProcess = null;
+      if (code && code !== 0 && !pass.destroyed) {
+        pass.destroy(new Error(`ffmpeg exited with code ${code}${stderr ? `: ${stderr.trim().slice(0, 300)}` : ''}`));
+      }
+    });
+
+    return createAudioResource(pass, {
+      inputType: StreamType.OggOpus,
+    });
+  }
+
   _getTargetBitrate() {
     const channelBitrate = Number(this.voiceChannel?.bitrate) || DEFAULT_OPUS_BITRATE;
     return Math.min(Math.max(channelBitrate, MIN_OPUS_BITRATE), MAX_OPUS_BITRATE);
   }
 
   _cleanupPlaybackResources() {
+    if (this._inputStream && !this._inputStream.destroyed && typeof this._inputStream.destroy === 'function') {
+      try { this._inputStream.destroy(); } catch {}
+    }
+    this._inputStream = null;
+
     if (this._sourceStream && !this._sourceStream.destroyed) {
       try { this._sourceStream.destroy(); } catch {}
     }
@@ -396,6 +523,11 @@ class GuildPlayer {
   }
 
   async _playAutoplay() {
+    if (this.lastTrack?.source !== 'tidal') {
+      this._startIdleTimer();
+      return;
+    }
+
     try {
       let recs = await hifi.recommendations(this.lastTrack.id, this.guildId);
       if (!recs.length) recs = await hifi.mix(this.lastTrack.id, this.guildId);
