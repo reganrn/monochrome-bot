@@ -15,7 +15,7 @@ User -> Discord bot -> Hi-Fi API (/track/) -> TIDAL CDN -> ffmpeg -> Discord voi
 | Streaming | TIDAL catalog playback through the Hi-Fi API, plus direct YouTube video URL playback |
 | Sources | TIDAL URLs, Monochrome share URLs, YouTube video URLs, plain text search |
 | Queue | Add, insert, remove, move, clear, shuffle |
-| Playback | Play, pause, resume, skip, stop, seek |
+| Playback | Play, pause, resume, skip, stop, seek (TIDAL only for seek) |
 | Modes | Repeat (off/track/queue), autoplay |
 | Lyrics | Hi-Fi/TIDAL lyrics first, Genius fallback |
 | Downloads | Monochrome lossless track links without Discord upload limits |
@@ -46,7 +46,19 @@ MAX_QUEUE_SIZE=500
 ALONE_TIMEOUT=30
 IDLE_TIMEOUT=300
 YTDLP_PATH=
+YTDLP_COOKIES_FILE=
+YTDLP_USER_AGENT=
+YTDLP_PLUGIN_DIR=/opt/yt-dlp-plugins
+YTDLP_JS_RUNTIMES=node
+YTDLP_EXTRACTOR_ARGS=youtube:player_client=mweb||youtubepot-bgutilhttp:base_url=http://bgutil-provider:4416
 ```
+
+For Docker deployments, the bot automatically checks `./data/youtube-cookies.txt` on the host through the existing `/app/data` volume mount.
+Set `YTDLP_COOKIES_FILE` only if you want to use a different cookies path.
+The provided `docker-compose.yml` starts a `bgutil-provider` sidecar and the bot image includes the matching yt-dlp plugin zip, so the default `YTDLP_EXTRACTOR_ARGS` uses `mweb` with that provider automatically.
+Set `YTDLP_JS_RUNTIMES=node` so yt-dlp enables Node for YouTube's EJS challenge solving inside the container.
+When passing multiple `--extractor-args` entries through `YTDLP_EXTRACTOR_ARGS`, separate full entries with `||`.
+If you need a different provider endpoint or client selection, override `YTDLP_EXTRACTOR_ARGS`.
 
 Deploy slash commands:
 
@@ -94,6 +106,8 @@ Notes:
 
 - YouTube support is URL-only. Plain text search still resolves through the Hi-Fi / TIDAL path.
 - Playlist and channel YouTube URLs are not supported. Use a direct video URL.
+- Direct YouTube playback requires a fresh `cookies.txt` export and may also require the PO token provider configuration above.
+- `/seek` is currently only supported for TIDAL / Monochrome tracks.
 
 Connection and API:
 

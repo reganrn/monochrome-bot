@@ -1,9 +1,21 @@
 services:
+  bgutil-provider:
+    image: brainicism/bgutil-ytdlp-pot-provider
+    container_name: bgutil-provider
+    init: true
+    restart: unless-stopped
+
   bot:
     build: .
     container_name: monochrome-bot
     restart: unless-stopped
+    depends_on:
+      - bgutil-provider
     env_file:
       - .env
+    environment:
+      YTDLP_PLUGIN_DIR: "${YTDLP_PLUGIN_DIR:-/opt/yt-dlp-plugins}"
+      YTDLP_JS_RUNTIMES: "${YTDLP_JS_RUNTIMES:-node}"
+      YTDLP_EXTRACTOR_ARGS: "${YTDLP_EXTRACTOR_ARGS:-youtube:player_client=mweb||youtubepot-bgutilhttp:base_url=http://bgutil-provider:4416}"
     volumes:
       - ./data:/app/data

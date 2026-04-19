@@ -1,12 +1,22 @@
 'use strict';
 
 const { execFile } = require('child_process');
+const fs = require('fs');
+const path = require('path');
 const { promisify } = require('util');
 
 const execFileAsync = promisify(execFile);
 const VIDEO_ID_RE = /^[A-Za-z0-9_-]{11}$/;
 const YTDLP_BUFFER_SIZE = 16 * 1024 * 1024;
 const PLAYBACK_CACHE_TTL_MS = 5 * 60 * 1000;
+const DEFAULT_COOKIES_FILES = [
+  '/app/data/youtube-cookies.txt',
+  path.join(process.cwd(), 'data', 'youtube-cookies.txt'),
+];
+const DEFAULT_PLUGIN_DIRS = [
+  '/opt/yt-dlp-plugins',
+  path.join(process.cwd(), 'yt-dlp-plugins'),
+];
 const playbackCache = new Map();
 
 function resolveYtDlpPath() {
@@ -82,9 +92,128 @@ function formatDuration(seconds) {
   return `${minutes}:${String(secs).padStart(2, '0')}`;
 }
 
+function getEnv(name) {
+  const value = process.env[name];
+  if (typeof value !== 'string') return null;
+
+  const trimmed = value.trim();
+  return trimmed ? trimmed : null;
+}
+
+function getYtDlpArgs() {
+  const args = [];
+  const pluginDir = resolvePluginDir();
+  if (pluginDir) {
+    args.push('--plugin-dirs', pluginDir);
+  }
+
+  const cookiesFile = resolveCookiesFile();
+  if (cookiesFile) {
+    args.push('--cookies', cookiesFile);
+  }
+
+  const userAgent = getEnv('YTDLP_USER_AGENT');
+  if (userAgent) {
+    args.push('--user-agent', userAgent);
+  }
+
+  const jsRuntimes = getEnv('YTDLP_JS_RUNTIMES');
+  if (jsRuntimes) {
+    args.push('--js-runtimes', jsRuntimes);
+  }
+
+  const extractorArgs = getExtractorArgs();
+  for (const value of extractorArgs) {
+    args.push('--extractor-args', value);
+  }
+
+  return args;
+}
+
+function getExtractorArgs() {
+  const raw = getEnv('YTDLP_EXTRACTOR_ARGS');
+  if (!raw) return [];
+
+  return raw
+    .split('||')
+    .map(value => value.trim())
+    .filter(Boolean);
+}
+
+function resolvePluginDir() {
+  const configured = getEnv('YTDLP_PLUGIN_DIR');
+  if (configured) {
+    if (!fs.existsSync(configured)) {
+      throw new Error(`Configured YTDLP_PLUGIN_DIR was not found: ${configured}`);
+    }
+    return configured;
+  }
+
+  for (const candidate of DEFAULT_PLUGIN_DIRS) {
+    if (fs.existsSync(candidate)) {
+      return candidate;
+    }
+  }
+
+  return null;
+}
+
+function resolveCookiesFile() {
+  const configured = getEnv('YTDLP_COOKIES_FILE');
+  if (configured) {
+    if (!fs.existsSync(configured)) {
+      throw new Error(`Configured YTDLP_COOKIES_FILE was not found: ${configured}`);
+    }
+    return configured;
+  }
+
+  for (const candidate of DEFAULT_COOKIES_FILES) {
+    if (fs.existsSync(candidate)) {
+      return candidate;
+    }
+  }
+
+  return null;
+}
+
+function buildAuthGuidance(rawError) {
+  const details = String(rawError ?? '');
+  if (!/sign in to confirm/i.test(details)) {
+    return null;
+  }
+
+  const cookiesFile = getEnv('YTDLP_COOKIES_FILE');
+  if (cookiesFile) {
+    return [
+      'YouTube blocked this request even with the configured cookies.',
+      'Refresh the cookies export, update YTDLP_USER_AGENT if needed, or add YTDLP_EXTRACTOR_ARGS with a YouTube PO token.',
+    ].join(' ');
+  }
+
+  return [
+    'YouTube now requires authenticated yt-dlp requests for this server.',
+    'Set YTDLP_COOKIES_FILE to a fresh YouTube cookies.txt export, for example /app/data/youtube-cookies.txt inside Docker.',
+  ].join(' ');
+}
+
+function buildFormatGuidance(rawError) {
+  const details = String(rawError ?? '');
+  if (!/requested format is not available/i.test(details)) {
+    return null;
+  }
+
+  return [
+    'YouTube did not expose any playable audio formats for this request.',
+    'If cookies are already configured, use a PO Token provider and an mweb player_client via YTDLP_EXTRACTOR_ARGS.',
+  ].join(' ');
+}
+
 async function runYtDlp(args) {
   try {
-    const { stdout, stderr } = await execFileAsync(resolveYtDlpPath(), args, {
+    const { stdout, stderr } = await execFileAsync(resolveYtDlpPath(), [
+      ...getYtDlpArgs(),
+      ...args,
+    ], {
       windowsHide: true,
       maxBuffer: YTDLP_BUFFER_SIZE,
     });
@@ -104,7 +233,18 @@ async function runYtDlp(args) {
       .split(/\r?\n/)
       .filter(Boolean);
 
-    throw new Error(details.at(-1) ?? 'yt-dlp failed.');
+    const fallback = details.at(-1) ?? 'yt-dlp failed.';
+    const guidance = buildAuthGuidance(details.join('\n'));
+    if (guidance) {
+      throw new Error(`${guidance} Original error: ${fallback}`);
+    }
+
+    const formatGuidance = buildFormatGuidance(details.join('\n'));
+    if (formatGuidance) {
+      throw new Error(`${formatGuidance} Original error: ${fallback}`);
+    }
+
+    throw new Error(fallback);
   }
 }
 
